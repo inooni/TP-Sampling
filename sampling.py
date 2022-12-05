@@ -27,6 +27,8 @@ from scipy import integrate
 import sde_lib
 from models import utils as mutils
 
+from tqdm import tqdm
+
 _CORRECTORS = {}
 _PREDICTORS = {}
 
@@ -354,7 +356,7 @@ def shared_corrector_update_fn(x, t, sde, model, corrector, continuous, snr, n_s
 
 def get_pc_sampler(sde, shape, predictor, corrector, inverse_scaler, snr,
                    n_steps=1, probability_flow=False, continuous=False,
-                   denoise=True, eps=1e-3, device='cuda'):
+                   denoise=True, eps=1e-3, device='cuda', tp_model = None):
   """Create a Predictor-Corrector (PC) sampler.
 
   Args:
@@ -398,14 +400,20 @@ def get_pc_sampler(sde, shape, predictor, corrector, inverse_scaler, snr,
     with torch.no_grad():
       # Initial sample
       x = sde.prior_sampling(shape).to(device)
-      timesteps = torch.linspace(sde.T, eps, sde.N, device=device)
-
-      for i in range(sde.N):
-        t = timesteps[i]
-        vec_t = torch.ones(shape[0], device=t.device) * t
-        x, x_mean = corrector_update_fn(x, vec_t, model=model)
-        x, x_mean = predictor_update_fn(x, vec_t, model=model)
-
+      if tp_model == None:
+        timesteps = torch.linspace(sde.T, eps, sde.N, device=device)
+      with tqdm(total = sde.N) as pbar:
+        for i in range(sde.N):
+          if tp_model == None:
+            t = timesteps[i]
+            vec_t = torch.ones(shape[0], device=t.device) * t
+          else:
+            vec_t = tp_model(x)
+            vec_t = vec_t.squeeze()
+            vec_t = torch.clamp(vec_t,min=1e-3, max=1.0)
+          x, x_mean = corrector_update_fn(x, vec_t, model=model)
+          x, x_mean = predictor_update_fn(x, vec_t, model=model)
+          pbar.update(1)
       return inverse_scaler(x_mean if denoise else x), sde.N * (n_steps + 1)
 
   return pc_sampler
